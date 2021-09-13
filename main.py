@@ -147,7 +147,7 @@ def running(run):
         flags.nb_max_step_without_improvements = 15
 
     flags.launch_mode = train_mode
-    flags.all_parameters = train_mode + '_seed' + str(launch_seed)
+    flags.all_parameters = train_mode + flags.loss_type + '_seed' + str(launch_seed)
 
     setproctitle.setproctitle(flags.backbone)
 
