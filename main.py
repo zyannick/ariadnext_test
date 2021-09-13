@@ -50,7 +50,7 @@ parser.add_argument('-nb_max_step_without_improvements', type=int, default=5)
 parser.add_argument('-data_parallel', type=boolean_string, default=False)
 parser.add_argument('-freeze', type=boolean_string, default=False)
 parser.add_argument('-checkpoint_path', type=str, default='checkpoint')
-parser.add_argument("-init_lr", type=float, default=0.01, help='')
+parser.add_argument("-init_lr", type=float, default=0.0001, help='')
 parser.add_argument("-dropout", type=float, default=0, help='')
 parser.add_argument("-l1_lambda", type=float, default=0, help='')
 parser.add_argument("-grad_steps", type=float, default=2, help='')
@@ -76,7 +76,7 @@ parser.add_argument('-only_load_data', type=boolean_string, default=False)
 parser.add_argument('-augment', type=boolean_string, default=False)
 parser.add_argument('-log_spectrogram', type=boolean_string, default=True)
 parser.add_argument('-validate', type=boolean_string, default=True)
-parser.add_argument('-sheduler_type', type=str, default=None, help='StepLR, CyclicLR, ReduceLROnPlateau,None')
+parser.add_argument('-sheduler_type', type=str, default='CyclicLR', help='StepLR, CyclicLR, ReduceLROnPlateau,None')
 parser.add_argument('-load_checkpoint', type=int, default=19,  metavar='N', help='epoch to load for checkpointing. If None, training starts from scratch')
 parser.add_argument('-optimizer', type=str, default="adagrad", choices=["sgd", "adagrad", "rmsprop", "adam"], help="Required optimizer for training the model: ('sgd','adagrad','rmsprop','adam'), (default: 'adagrad')" )
 parser.add_argument('-metric', type=str, default="add_margin", choices=["add_margin", "arc_margin", "sphere"])
@@ -129,6 +129,25 @@ def system_info():
         print("CPUs")
 
 
+# def get_lfw_list(pair_list):
+#     with open(pair_list, 'r') as fd:
+#         pairs = fd.readlines()
+#
+#     data_list = []
+#     for pair in pairs:
+#         print(type(pair))
+#         print(pair)
+#
+#         splits = pair.split()
+#         print(splits)
+#         print('\n')
+#
+#         if splits[0] not in data_list:
+#             data_list.append(splits[0])
+#
+#         if splits[1] not in data_list:
+#             data_list.append(splits[1])
+#     return data_list
 
 
 def running(run):
@@ -173,6 +192,9 @@ def running(run):
 
     
     print(colored('Loading data', 'blue'))
+
+    # get_lfw_list('lfw_test_pair.txt')
+
 
     datafiles, taille, nb_classes_train, nb_classes_val = get_data(flags)
     flags.num_classes = nb_classes_train

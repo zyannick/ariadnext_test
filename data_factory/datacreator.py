@@ -10,6 +10,8 @@ from termcolor import colored
 import cv2
 from tqdm import tqdm
 import json
+from itertools import combinations
+import copy
 
 
 def make_weights_for_balanced_classes(dataset):
@@ -87,7 +89,14 @@ def get_data(flags):
 
     test_data = []
     nb_classes_test = 0
+    #list names with more than 1 image
+    list_more_1_image = []
+    list_only_1_image = []
     for label, name in enumerate(list_names[int(0.8 * nb_names):-1]):
+        if len(dict_data[name]) >= 2:
+            list_more_1_image.append(name)
+        if len(dict_data[name]) == 1:
+            list_only_1_image.append(name)
         for filename, label in dict_data[name]:
             test_data.append(
                 (filename, label)
@@ -96,6 +105,30 @@ def get_data(flags):
         nb_classes_test += 1
 
 
-    data_files = {'train': train_data, 'val': test_data, 'test': []}
+    matched_pairs = []
+    for name in list_more_1_image:
+        all_combi_names = list(combinations(dict_data[name], 2))
+        for pairs_files in all_combi_names:
+            (first_file, l), (second_file, s) = pairs_files
+            matched_pairs.append(
+                (first_file, second_file, 1)
+            )
+
+
+    combi_only_one_file_names = list(combinations(list_only_1_image, 2))
+    mismached_pairs = []
+    for name1, name2 in combi_only_one_file_names:
+        file1, label1 = dict_data[name1][0]
+        file2, label2 = dict_data[name2][0]
+        mismached_pairs.append(
+            (file1, file2, 0)
+        )
+
+    random.shuffle(matched_pairs)
+    random.shuffle(mismached_pairs)
+
+    val_lists = copy.copy(matched_pairs[0:3000]) + copy.copy(mismached_pairs[0:3000])
+
+    data_files = {'train': train_data, 'val': val_lists, 'test': []}
 
     return data_files, taille, nb_classes_train, nb_classes_test

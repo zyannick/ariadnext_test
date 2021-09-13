@@ -45,7 +45,7 @@ from models.plotting import plot_roc_lfw, plot_accuracy_lfw
 from backbones.margins import *
 from miscellaneous.utils import Visualizer
 import time
-from .test_utils import  *
+from .test_utils import *
 
 
 def worker_init_fn(worker_id):
@@ -57,6 +57,8 @@ Class containing:
 - training functions
 - inference
 '''
+
+
 class ImageModel(object):
     def __init__(self,
                  flags,
@@ -104,7 +106,8 @@ class ImageModel(object):
         self.use_semihard_negatives = flags.use_semihard_negatives
         self.training_triplets_path = flags.training_triplets_path
         if flags.phase == 'train':
-            self.writer = SummaryWriter(log_dir=os.path.join('runs', self.flags.all_parameters + '_' + str(datetime.now())))
+            self.writer = SummaryWriter(
+                log_dir=os.path.join('runs', self.flags.all_parameters + '_' + str(datetime.now())))
         else:
             self.writer = None
 
@@ -211,7 +214,6 @@ class ImageModel(object):
 
         self.dataloaders = {'train': train_dataloader, 'val': val_dataloader, 'test': test_dataloader}
 
-
         if not os.path.exists(flags.logs):
             os.makedirs(flags.logs)
 
@@ -244,8 +246,6 @@ class ImageModel(object):
             if param.requires_grad:
                 named_params_to_update[name] = param
 
-
-
         metrics_parameters_to_update = {}
 
         for name, param in self.metric_fc.named_parameters():
@@ -254,13 +254,14 @@ class ImageModel(object):
                 metrics_parameters_to_update[name] = param
 
         print("Params to learn:")
-        if len(named_params_to_update) +  len(metrics_parameters_to_update) == total_params:
+        if len(named_params_to_update) + len(metrics_parameters_to_update) == total_params:
             print("\tfull network")
         else:
             for name in named_params_to_update:
                 print("\t{}".format(name))
 
-        parameters = [{'params': list(named_params_to_update.values())}, {'params': list(metrics_parameters_to_update.values())}]
+        parameters = [{'params': list(named_params_to_update.values())},
+                      {'params': list(metrics_parameters_to_update.values())}]
 
         if flags.optimizer == "sgd":
             print(colored(flags.optimizer, 'red'))
@@ -311,18 +312,10 @@ class ImageModel(object):
 
         self.loss_fn = torch.nn.CrossEntropyLoss()
 
-        if self.flags.sheduler_type == 'ReduceLROnPlateau':
-            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                self.network_optimizer, mode='min', patience=flags.patience)
-        elif self.flags.sheduler_type == 'StepLR':
-            self.scheduler = optim.lr_scheduler.StepLR(
-                self.network_optimizer, step_size=self.flags.step_size)
-        elif self.flags.sheduler_type == 'CyclicLR':
-            self.scheduler = optim.lr_scheduler.CyclicLR(
+        self.scheduler = optim.lr_scheduler.CyclicLR(
                 self.network_optimizer, base_lr=self.init_lr, max_lr=1e-2, step_size_up=self.flags.step_size,
-                cycle_momentum=(flags.optimizer != 'Adam'))
-        else:
-            self.scheduler = None
+                cycle_momentum=(flags.optimizer != 'adam' and flags.optimizer != 'adagrad'))
+
 
         self.loss_function = torch.nn.CrossEntropyLoss()
 
@@ -335,24 +328,25 @@ class ImageModel(object):
 
         self.current_lr = lr
 
-    def checkpointing(self, save_curr=True):
+    def checkpointing(self):
         # if self.verbose > 0:
         # print(' ')
         #    print('Checkpointing...')
 
         ckpt = {
             'model': self.network.state_dict(),
+            'metric': self.metric_fc.state_dict(),
             'history': self.history,
             'cur_epoch': self.cur_epoch,
             'learning_rate': self.current_lr,
             'optimizer': self.optimizer
         }
-        if save_curr:
-            torch.save(ckpt, self.save_epoch_fmt_task.format(self.cur_epoch))
 
-        if self.cur_epoch == self.best_epoch:
-            torch.save(ckpt, os.path.join(self.checkpoint_path,
-                                          'best_model.pt'))
+        torch.save(ckpt, self.save_epoch_fmt_task.format(self.cur_epoch))
+
+        # if self.cur_epoch == self.best_epoch:
+        #     torch.save(ckpt, os.path.join(self.checkpoint_path,
+        #                                   'best_model.pt'))
 
     def load_checkpoint(self, epoch):
 
@@ -366,7 +360,7 @@ class ImageModel(object):
                 self.cur_epoch = ckpt['cur_epoch']
                 self.current_lr = ckpt['learning_rate']
                 self.l1_lambda = ckpt['learning_rate']
-                #self.optimizer = ckpt['optimizer']
+                # self.optimizer = ckpt['optimizer']
                 return True
 
             return False
@@ -385,14 +379,14 @@ class ImageModel(object):
             else:
                 print(colored('No checkpoint found at: {}'.format(ckpt), 'red'))
                 if self.flags.phase != 'train':
-                    raise ValueError('----------Unable to load checkpoint  {}. The program will exit now----------\n\n'.format(ckpt))
+                    raise ValueError(
+                        '----------Unable to load checkpoint  {}. The program will exit now----------\n\n'.format(ckpt))
 
             return False
 
     def printing_train(self, tot_loss, current_lr):
         aff = 'Train results : ite:{}, Loss:{:.4f}, current_lr: {}'.format(self.cur_epoch, tot_loss, current_lr)
         return aff
-
 
     def train_am(self, flags):
 
@@ -409,7 +403,6 @@ class ImageModel(object):
             data_iter = tqdm(enumerate(loader), disable=False)
             total_loss = 0.0
 
-
             for step, data in data_iter:
                 inputs, labels = data
 
@@ -420,11 +413,12 @@ class ImageModel(object):
                 inputs = Variable(inputs.cuda())
 
                 labels = Variable(labels.cuda())
+                # print(inputs.shape)
 
                 self.network_optimizer.zero_grad()
-                #print(inputs.shape)
+                # print(inputs.shape)
                 embeddings = self.network(inputs)
-                #print(embeddings.shape)
+                # print(embeddings.shape)
                 outputs = self.metric_fc(embeddings, labels)
                 loss = self.loss_fn(outputs, labels)
 
@@ -434,9 +428,7 @@ class ImageModel(object):
 
                 iters += 1
 
-
                 if iters % flags.print_freq == 0:
-
                     outputs = outputs.data.cpu().numpy()
                     outputs = np.argmax(outputs, axis=1)
 
@@ -446,35 +438,40 @@ class ImageModel(object):
                     acc = np.mean((outputs == labels).astype(int))
                     speed = flags.print_freq / (time.time() - start)
                     time_str = time.asctime(time.localtime(time.time()))
-                    print('{}:  train epoch {} iter {} {} iters/s loss {:.4f} acc {}'.format(time_str, self.cur_epoch, iters, speed, loss.item(), acc))
+                    print('Train epoch {} iter {} {} iters/s loss {:.4f} acc {}'.format(self.cur_epoch, iters, speed, loss.item(), acc))
 
-
+                    acc =  self.validation()
+                    print(colored('Testing accuracy {}'.format(acc), 'blue'))
                     start = time.time()
 
             self.scheduler.step()
+            self.current_lr = self.scheduler.get_last_lr()
+
 
             self.cur_epoch += 1
 
+            if (self.cur_epoch +
+                1) % self.save_every == 0 and self.cur_epoch != 0:
+                self.checkpointing()
 
-
-    def test(self, flags):
+    def validation(self):
+        flags = self.flags
         s = time.time()
+        identity_list = get_lfw_list(self.datafiles['val'])
+        img_paths = [os.path.join(each) for each in identity_list]
 
-        features, cnt = self.get_features()
+        features, cnt = self.get_features(img_paths, batch_size=flags.batch_size)
 
         t = time.time() - s
 
         print('total time is {}, average time is {}'.format(t, t / cnt))
         fe_dict = get_feature_dict(identity_list, features)
-        acc, th = test_performance(fe_dict, compair_list)
+        acc, th = test_performance(fe_dict, self.datafiles['val'])
         print('lfw face verification accuracy: ', acc, 'threshold: ', th)
+
         return acc
 
-        return
-
-
-
-    def get_features(self, batch_size=10):
+    def get_features(self, test_list, batch_size=10):
 
         self.network.eval()
 
@@ -495,8 +492,9 @@ class ImageModel(object):
                 cnt += 1
 
                 data = torch.from_numpy(images)
-                data = data.to(torch.device("cuda"))
-                output = model(data)
+                data = data.cuda()
+                # print(data.shape)
+                output = self.network(data)
                 output = output.data.cpu().numpy()
 
                 fe_1 = output[::2]
@@ -512,7 +510,6 @@ class ImageModel(object):
                 images = None
 
         return features, cnt
-
 
     def bn_process(self, flags):
         if flags.bn_eval:
