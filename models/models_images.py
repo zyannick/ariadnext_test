@@ -39,12 +39,13 @@ import pickle as pickle
 import json
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
-from time import time
 from models.plotting import plot
 from torch.nn.modules.distance import PairwiseDistance
 from models.plotting import plot_roc_lfw, plot_accuracy_lfw
 from backbones.margins import *
 from miscellaneous.utils import Visualizer
+import time
+from .test_utils import  *
 
 
 def worker_init_fn(worker_id):
@@ -116,10 +117,21 @@ class ImageModel(object):
         if flags.freeze:
             self.freeze()
 
+        if flags.metric == 'add_margin':
+            self.metric_fc = AddMarginProduct(512, flags.num_classes, s=30, m=0.35)
+        elif flags.metric == 'arc_margin':
+            self.metric_fc = ArcMarginProduct(512, flags.num_classes, s=30, m=0.5, easy_margin=flags.easy_margin)
+        elif flags.metric == 'sphere':
+            self.metric_fc = SphereProduct(512, flags.num_classes, m=4)
+        else:
+            self.metric_fc = nn.Linear(512, flags.num_classes)
+
         self.network = self.network.cuda()
+        self.metric_fc = self.metric_fc.cuda()
         if flags.data_parallel:
             if cuda.device_count() > 1:
                 self.network = nn.DataParallel(self.network)
+                self.metric_fc = nn.DataParallel(self.metric_fc)
 
     def setup_path(self, flags):
 
@@ -232,14 +244,7 @@ class ImageModel(object):
             if param.requires_grad:
                 named_params_to_update[name] = param
 
-        if flags.metric == 'add_margin':
-            self.metric_fc = AddMarginProduct(512, flags.num_classes, s=30, m=0.35)
-        elif flags.metric == 'arc_margin':
-            self.metric_fc = ArcMarginProduct(512, flags.num_classes, s=30, m=0.5, easy_margin=flags.easy_margin)
-        elif flags.metric == 'sphere':
-            self.metric_fc = SphereProduct(512, flags.num_classes, m=4)
-        else:
-            self.metric_fc = nn.Linear(512, flags.num_classes)
+
 
         metrics_parameters_to_update = {}
 
@@ -388,16 +393,6 @@ class ImageModel(object):
         aff = 'Train results : ite:{}, Loss:{:.4f}, current_lr: {}'.format(self.cur_epoch, tot_loss, current_lr)
         return aff
 
-    def forward_pass(self, imgs, model, batch_size):
-        imgs = imgs.cuda()
-        embeddings = model(imgs)
-
-        # Split the embeddings into Anchor, Positive, and Negative embeddings
-        anc_embeddings = embeddings[:batch_size]
-        pos_embeddings = embeddings[batch_size: batch_size * 2]
-        neg_embeddings = embeddings[batch_size * 2:]
-
-        return anc_embeddings, pos_embeddings, neg_embeddings, model
 
     def train_am(self, flags):
 
@@ -405,7 +400,7 @@ class ImageModel(object):
 
         iters = 0
 
-        start = time()
+        start = time.time()
 
         while self.cur_epoch < self.flags.num_epochs:
 
@@ -427,9 +422,9 @@ class ImageModel(object):
                 labels = Variable(labels.cuda())
 
                 self.network_optimizer.zero_grad()
-                print(inputs.shape)
+                #print(inputs.shape)
                 embeddings = self.network(inputs)
-                print(embeddings.shape)
+                #print(embeddings.shape)
                 outputs = self.metric_fc(embeddings, labels)
                 loss = self.loss_fn(outputs, labels)
 
@@ -446,20 +441,77 @@ class ImageModel(object):
                     outputs = np.argmax(outputs, axis=1)
 
                     labels = labels.data.cpu().numpy()
-                    # print(output)
-                    # print(label)
+                    # print(outputs)
+                    # print(labels)
                     acc = np.mean((outputs == labels).astype(int))
                     speed = flags.print_freq / (time.time() - start)
                     time_str = time.asctime(time.localtime(time.time()))
-                    print('{} train epoch {} iter {} {} iters/s loss {} acc {}'.format(time_str, self.cur_epoch, iters, speed,
-                                                                                       loss.item(), acc))
+                    print('{}:  train epoch {} iter {} {} iters/s loss {:.4f} acc {}'.format(time_str, self.cur_epoch, iters, speed, loss.item(), acc))
 
 
                     start = time.time()
 
+            self.scheduler.step()
+
             self.cur_epoch += 1
 
 
+
+    def test(self, flags):
+        s = time.time()
+
+        features, cnt = self.get_features()
+
+        t = time.time() - s
+
+        print('total time is {}, average time is {}'.format(t, t / cnt))
+        fe_dict = get_feature_dict(identity_list, features)
+        acc, th = test_performance(fe_dict, compair_list)
+        print('lfw face verification accuracy: ', acc, 'threshold: ', th)
+        return acc
+
+        return
+
+
+
+    def get_features(self, batch_size=10):
+
+        self.network.eval()
+
+        images = None
+        features = None
+        cnt = 0
+        for i, img_path in enumerate(test_list):
+            image = load_image(img_path)
+            if image is None:
+                print('read {} error'.format(img_path))
+
+            if images is None:
+                images = image
+            else:
+                images = np.concatenate((images, image), axis=0)
+
+            if images.shape[0] % batch_size == 0 or i == len(test_list) - 1:
+                cnt += 1
+
+                data = torch.from_numpy(images)
+                data = data.to(torch.device("cuda"))
+                output = model(data)
+                output = output.data.cpu().numpy()
+
+                fe_1 = output[::2]
+                fe_2 = output[1::2]
+                feature = np.hstack((fe_1, fe_2))
+                # print(feature.shape)
+
+                if features is None:
+                    features = feature
+                else:
+                    features = np.vstack((features, feature))
+
+                images = None
+
+        return features, cnt
 
 
     def bn_process(self, flags):

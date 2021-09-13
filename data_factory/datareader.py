@@ -42,7 +42,7 @@ from scipy.signal import spectrogram
 import miscellaneous.transforms_video as augmentations
 from torchvision.transforms import Compose
 
-import torchvision.transforms as transforms
+from torchvision import transforms as T
 
 DEFAULT_MEAN = (0.43216, 0.394666, 0.37645)
 DEFAULT_STD = (0.22803, 0.22145, 0.216989)
@@ -86,7 +86,7 @@ def rgb2gray(rgb):
 
 input_size = {
     'convnet':224,
-    'resnet18': 224,
+    'resnet18': 128,
     'resnet34': 224,
     'resnet50': 224,
     'vgg16': 224,
