@@ -86,21 +86,13 @@ def rgb2gray(rgb):
 
 input_size = {
     'convnet':224,
-    'ddss_resnet18': 224,
-    'ddss_resnet34': 224,
-    'ddss_resnet50': 224,
-    'ddss_vgg16': 224,
-    'ddss_alexnet': 256,
-    'ddss_xception': 256,
-    'ddss_vit': 224,
-    'ddss_efficientnet-b0': 224,
-    'ddss_efficientnet-b1': 240,
-    'ddss_efficientnet-b2': 260,
-    'ddss_efficientnet-b3': 300,
-    'ddss_efficientnet-b4': 380,
-    'ddss_efficientnet-b5': 456,
-    'ddss_efficientnet-b6': 528,
-    'ddss_efficientnet-b7': 600
+    'resnet18': 224,
+    'resnet34': 224,
+    'resnet50': 224,
+    'vgg16': 224,
+    'alexnet': 256,
+    'xception': 256,
+    'vit': 224
 }
 
 
@@ -127,7 +119,8 @@ class Image_Reader(data_utl.Dataset):
         """
         filename, label = self.filelist[index]
 
-        img = cv2.imread(filename, -1)
+        img = cv2.imread(filename, 0)
+        img = np.expand_dims(img, axis=2)
 
         img_shape = input_size[self.args.backbone]
 
@@ -137,6 +130,8 @@ class Image_Reader(data_utl.Dataset):
             img = self.augment_data(img)
 
         label = np.asarray([label], dtype=np.float32)
+        if len(img.shape) == 2:
+            img = np.expand_dims(img, axis=2)
         img = np.float32(img).transpose(2, 0, 1)
 
         img = (img / 255.) * 2 - 1

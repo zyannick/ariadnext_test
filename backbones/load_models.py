@@ -1,14 +1,8 @@
 import torch.nn as nn
 import torch
 from backbones import modified_resnet
-from .baselien_conv import ConvAngularPen
-from .resnet import (
-    Resnet18Triplet,
-    Resnet34Triplet,
-    Resnet50Triplet
-)
 
-from utils_resnet import resnet34, resnet_face18, resnet50
+from .utils_resnet import resnet34, resnet_face18, resnet50
 
 
 # bypass layer

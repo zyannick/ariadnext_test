@@ -218,8 +218,7 @@ class ResNetFace(nn.Module):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes * block.expansion,
-                          kernel_size=1, stride=stride, bias=False),
+                nn.Conv2d(self.inplanes, planes * block.expansion, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(planes * block.expansion),
             )
         layers = []
@@ -243,6 +242,7 @@ class ResNetFace(nn.Module):
         x = self.bn4(x)
         x = self.dropout(x)
         x = x.view(x.size(0), -1)
+        print(x.shape)
         x = self.fc5(x)
         x = self.bn5(x)
 

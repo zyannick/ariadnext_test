@@ -60,14 +60,17 @@ class ImageModel(object):
     def __init__(self,
                  flags,
                  backbone,
+                 nb_classes_train,
+                 nb_classes_val,
                  datafiles=None,
                  checkpoint_path=None,
-                 train_mode='',
-                 data_weitghs=None):
+                 train_mode=''):
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
         self.init_lr = flags.init_lr
         self.network = backbone
         self.datafiles = datafiles
+        self.nb_classes_train = nb_classes_train
+        self.nb_classes_test = nb_classes_val
         self.verbose = flags.verbose
         self.checkpoint_path = checkpoint_path
         self.save_every = flags.save_every
@@ -75,7 +78,6 @@ class ImageModel(object):
         self.launch_mode = train_mode
         self.l1_lambda = flags.l1_lambda
         self.num_devices = cuda.device_count()
-        self.train_data_weitghs, _ = data_weitghs if data_weitghs is not None else (None, None)
         self.cur_epoch = 0
         self.current_lr = None
         self.nb_step_without_improving = 0
@@ -186,7 +188,7 @@ class ImageModel(object):
                 pin_memory=True,
                 worker_init_fn=worker_init_fn)
 
-        if self.dataset_sizes['val'] > 0:
+        if self.dataset_sizes['test'] > 0:
             test_dataloader = torch.utils.data.DataLoader(
                 test_dataset,
                 batch_size=flags.batch_size * self.num_devices,
@@ -239,22 +241,26 @@ class ImageModel(object):
         else:
             self.metric_fc = nn.Linear(512, flags.num_classes)
 
+        metrics_parameters_to_update = {}
+
         for name, param in self.metric_fc.named_parameters():
             total_params += 1
             if param.requires_grad:
-                named_params_to_update[name] = param
+                metrics_parameters_to_update[name] = param
 
         print("Params to learn:")
-        if len(named_params_to_update) == total_params:
+        if len(named_params_to_update) +  len(metrics_parameters_to_update) == total_params:
             print("\tfull network")
         else:
             for name in named_params_to_update:
                 print("\t{}".format(name))
 
+        parameters = [{'params': list(named_params_to_update.values())}, {'params': list(metrics_parameters_to_update.values())}]
+
         if flags.optimizer == "sgd":
             print(colored(flags.optimizer, 'red'))
             self.network_optimizer = optim.SGD(
-                params=list(named_params_to_update.values()),
+                params=parameters,
                 lr=self.init_lr,
                 momentum=0.9,
                 dampening=0,
@@ -265,7 +271,7 @@ class ImageModel(object):
         elif flags.optimizer == "adagrad":
             print(colored(flags.optimizer, 'red'))
             self.network_optimizer = optim.Adagrad(
-                params=list(named_params_to_update.values()),
+                params=parameters,
                 lr=self.init_lr,
                 lr_decay=0,
                 initial_accumulator_value=0.1,
@@ -276,7 +282,7 @@ class ImageModel(object):
         elif flags.optimizer == "rmsprop":
             print(colored(flags.optimizer, 'red'))
             self.network_optimizer = optim.RMSprop(
-                params=list(named_params_to_update.values()),
+                params=parameters,
                 lr=self.init_lr,
                 alpha=0.99,
                 eps=1e-08,
@@ -288,7 +294,7 @@ class ImageModel(object):
         elif flags.optimizer == "adam":
             print(colored(flags.optimizer, 'red'))
             self.network_optimizer = optim.Adam(
-                params=list(named_params_to_update.values()),
+                params=parameters,
                 lr=self.init_lr,
                 betas=(0.9, 0.999),
                 eps=1e-08,
@@ -421,8 +427,9 @@ class ImageModel(object):
                 labels = Variable(labels.cuda())
 
                 self.network_optimizer.zero_grad()
-
+                print(inputs.shape)
                 embeddings = self.network(inputs)
+                print(embeddings.shape)
                 outputs = self.metric_fc(embeddings, labels)
                 loss = self.loss_fn(outputs, labels)
 
