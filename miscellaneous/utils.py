@@ -169,71 +169,43 @@ def compute_accuracy(predictions, labels, probabilities = None):
     return accuracy, f1_sco, cf, auc, auc_soft
 
 
-def cross_batch_accuracy(per_frame_logits, labels):
-    y_predicted = torch.max(per_frame_logits, dim=2)[0]
-    y_predicted = y_predicted.cuda()
-    y_predicted = y_predicted.cpu().detach().numpy()
-    y_predicted = np.argmax(y_predicted, axis=1)
-
-    y_ground_truth = torch.max(labels, dim=2)[0]
-    y_ground_truth = y_ground_truth.cuda()
-    y_ground_truth = y_ground_truth.cpu().detach().numpy()
-    y_ground_truth = np.argmax(y_ground_truth, axis=1)
-
-    # print(y_predicted)
-    # print(y_ground_truth)
-    # print('\n')
-
-    from sklearn.metrics import multilabel_confusion_matrix
-    from sklearn.metrics import accuracy_score
-    from sklearn.metrics import f1_score
-    # print(multilabel_confusion_matrix(y_ground_truth, y_predicted))
-    # print('Cross batch accuracy %4.4f'%(accuracy_score(y_ground_truth, y_predicted)))
-    return accuracy_score(y_ground_truth,
-                          y_predicted), f1_score(y_ground_truth,
-                                                 y_predicted,
-                                                 average='weighted')
 
 
-def per_video_accuracy(per_frame_logits, labels):
-    y_predicted = per_frame_logits.cuda()
-    y_predicted = y_predicted.cpu().detach().numpy()
 
-    y_ground_truth = labels.cuda()
-    y_ground_truth = y_ground_truth.cpu().detach().numpy()
+import visdom
+import time
+from matplotlib import pyplot as plt
+from sklearn.metrics import roc_curve
 
-    nb_batches = y_predicted.shape[0]
 
-    #i = random.randint(0, nb_batches - 1)
+class Visualizer(object):
 
-    r_shape = y_predicted.shape
+    def __init__(self, env='default', **kwargs):
+        self.vis = visdom.Visdom(env=env, **kwargs)
+        self.vis.close()
 
-    #print(r_shape)
+        self.iters = {}
+        self.lines = {}
 
-    ground_truth = []
-    predictions = []
+    def display_current_results(self, iters, x, name='train_loss'):
+        if name not in self.iters:
+            self.iters[name] = []
 
-    for i in range(nb_batches):
+        if name not in self.lines:
+            self.lines[name] = []
 
-        y_predicted_video = y_predicted[i]
-        y_ground_truth_video = y_ground_truth[i]
+        self.iters[name].append(iters)
+        self.lines[name].append(x)
 
-        y_predicted_video = np.reshape(y_predicted_video,
-                                       (r_shape[1], r_shape[2]))
-        y_ground_truth_video = np.reshape(y_ground_truth_video,
-                                          (r_shape[1], r_shape[2]))
+        self.vis.line(X=np.array(self.iters[name]),
+                      Y=np.array(self.lines[name]),
+                      win=name,
+                      opts=dict(legend=[name], title=name))
 
-        y_predicted_video = np.argmax(y_predicted_video, axis=0)
-        y_ground_truth_video = np.argmax(y_ground_truth_video, axis=0)
-
-        from sklearn.metrics import accuracy_score
-        # print('y_predicted_video {}'.format(y_predicted_video))
-        # print('y_ground_truth_video {}'.format(y_ground_truth_video))
-
-        ground_truth.extend(y_ground_truth_video.tolist())
-        predictions.extend(y_predicted_video.tolist())
-
-    # print('predictions {}'.format(predictions))
-    # print('ground_truth {}'.format(ground_truth))
-
-    return predictions, ground_truth
+    def display_roc(self, y_true, y_pred):
+        fpr, tpr, ths = roc_curve(y_true, y_pred)
+        self.vis.line(X=fpr,
+                      Y=tpr,
+                      # win='roc',
+                      opts=dict(legend=['roc'],
+                                title='roc'))

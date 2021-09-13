@@ -42,10 +42,9 @@ from torch.utils.tensorboard import SummaryWriter
 from time import time
 from models.plotting import plot
 from torch.nn.modules.distance import PairwiseDistance
-from losses.triplet_loss import TripletLoss
-from data_factory.TripletLossDataset import TripletFaceDataset
 from models.plotting import plot_roc_lfw, plot_accuracy_lfw
 from backbones.margins import *
+from miscellaneous.utils import Visualizer
 
 
 def worker_init_fn(worker_id):
@@ -123,34 +122,80 @@ class ImageModel(object):
     def setup_path(self, flags):
 
         image_size = flags.image_size
-        use_semihard_negatives = flags.use_semihard_negatives
-        training_triplets_path = flags.training_triplets_path
-        flag_training_triplets_path = False
+        self.train_data = self.datafiles['train']
+        if self.flags.validate:
+            self.val_data = self.datafiles['val']
+        else:
+            self.val_data = []
 
+        self.test_data = self.datafiles['test']
 
-        if training_triplets_path is not None:
-            flag_training_triplets_path = True  # Load triplets file for the first training epoch
+        train_dataset = Image_Reader(
+            args=self.flags, filelist=self.train_data)
+        val_dataset = Image_Reader(args=self.flags,
+                                   filelist=self.val_data,
+                                   is_train=False)
+        test_dataset = Image_Reader(args=self.flags,
+                                    filelist=self.test_data,
+                                    is_train=False)
 
+        self.datasets = {
+            'train': train_dataset,
+            'val': val_dataset,
+            'test': test_dataset
+        }
 
-        self.data_transforms = transforms.Compose([
-            transforms.Resize(size=image_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(degrees=5),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.6071, 0.4609, 0.3944],
-                std=[0.2457, 0.2175, 0.2129]
-            )
-        ])
+        if flags.phase == 'vizualize':
+            flags.batch_size = 1
 
-        lfw_transforms = transforms.Compose([
-            transforms.Resize(size=image_size),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.6071, 0.4609, 0.3944],
-                std=[0.2457, 0.2175, 0.2129]
-            )
-        ])
+        self.train_len = train_dataset.__len__()
+        self.test_len = test_dataset.__len__()
+        self.val_len = val_dataset.__len__()
+
+        print('longeur train {}'.format(train_dataset.__len__()))
+        print('longeur val {}'.format(val_dataset.__len__()))
+        print('longeur test {}'.format(test_dataset.__len__()))
+
+        print('number of workers = {}'.format(mp.cpu_count()))
+
+        image_datasets = {'train': train_dataset,
+                          'val': val_dataset, 'test': test_dataset}
+
+        self.dataset_sizes = {
+            x: len(image_datasets[x])
+            for x in ['train', 'val', 'test']
+        }
+
+        val_dataloader = None
+        test_dataloader = None
+
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=flags.batch_size * self.num_devices,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True,
+            worker_init_fn=worker_init_fn)
+
+        if self.dataset_sizes['val'] > 0:
+            val_dataloader = torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=flags.batch_size * self.num_devices,
+                shuffle=True,
+                num_workers=0,
+                pin_memory=True,
+                worker_init_fn=worker_init_fn)
+
+        if self.dataset_sizes['val'] > 0:
+            test_dataloader = torch.utils.data.DataLoader(
+                test_dataset,
+                batch_size=flags.batch_size * self.num_devices,
+                shuffle=(flags.phase != 'timeline_prediction'),
+                num_workers=0,
+                pin_memory=True,
+                worker_init_fn=worker_init_fn)
+
+        self.dataloaders = {'train': train_dataloader, 'val': val_dataloader, 'test': test_dataloader}
 
 
         if not os.path.exists(flags.logs):
@@ -173,8 +218,6 @@ class ImageModel(object):
         for name, para in self.network.named_parameters():
             print(name, para.size())
 
-        
-
         total_params = 0
 
         named_params_to_update = {}
@@ -187,13 +230,26 @@ class ImageModel(object):
             if param.requires_grad:
                 named_params_to_update[name] = param
 
+        if flags.metric == 'add_margin':
+            self.metric_fc = AddMarginProduct(512, flags.num_classes, s=30, m=0.35)
+        elif flags.metric == 'arc_margin':
+            self.metric_fc = ArcMarginProduct(512, flags.num_classes, s=30, m=0.5, easy_margin=flags.easy_margin)
+        elif flags.metric == 'sphere':
+            self.metric_fc = SphereProduct(512, flags.num_classes, m=4)
+        else:
+            self.metric_fc = nn.Linear(512, flags.num_classes)
+
+        for name, param in self.metric_fc.named_parameters():
+            total_params += 1
+            if param.requires_grad:
+                named_params_to_update[name] = param
+
         print("Params to learn:")
         if len(named_params_to_update) == total_params:
             print("\tfull network")
         else:
             for name in named_params_to_update:
                 print("\t{}".format(name))
-
 
         if flags.optimizer == "sgd":
             print(colored(flags.optimizer, 'red'))
@@ -240,28 +296,19 @@ class ImageModel(object):
                 weight_decay=1e-5
             )
 
-        if flags.metric is not None:
-            if flags.metric == 'add_margin':
-                metric_fc = AddMarginProduct(512, flags.num_classes, s=30, m=0.35)
-            elif flags.metric == 'arc_margin':
-                metric_fc = ArcMarginProduct(512, flags.num_classes, s=30, m=0.5, easy_margin=opt.easy_margin)
-            elif flags.metric == 'sphere':
-                metric_fc = SphereProduct(512, flags.num_classes, m=4)
-            else:
-                metric_fc = nn.Linear(512, flags.num_classes)
-
         self.device = next(self.network.parameters()).device
 
+        self.loss_fn = torch.nn.CrossEntropyLoss()
 
         if self.flags.sheduler_type == 'ReduceLROnPlateau':
             self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer, mode='min', patience=flags.patience)
+                self.network_optimizer, mode='min', patience=flags.patience)
         elif self.flags.sheduler_type == 'StepLR':
             self.scheduler = optim.lr_scheduler.StepLR(
-                self.optimizer, step_size=self.flags.step_size)
+                self.network_optimizer, step_size=self.flags.step_size)
         elif self.flags.sheduler_type == 'CyclicLR':
             self.scheduler = optim.lr_scheduler.CyclicLR(
-                self.optimizer, base_lr=self.init_lr, max_lr=1e-2, step_size_up=self.flags.step_size,
+                self.network_optimizer, base_lr=self.init_lr, max_lr=1e-2, step_size_up=self.flags.step_size,
                 cycle_momentum=(flags.optimizer != 'Adam'))
         else:
             self.scheduler = None
@@ -272,7 +319,7 @@ class ImageModel(object):
         """Sets the learning rate to the initial LR decayed by 10 every n epoch epochs"""
         every_n_epoch = every_n  # n_epoch/n_step
         lr = flags.init_lr * (0.1 ** (epoch // flags.step_size))
-        for param_group in self.optimizer.param_groups:
+        for param_group in self.network_optimizer.param_groups:
             param_group['lr'] = lr
 
         self.current_lr = lr
@@ -346,154 +393,65 @@ class ImageModel(object):
 
         return anc_embeddings, pos_embeddings, neg_embeddings, model
 
-    def train_am(self, train_loader, loss_type):
-        total_step = len(train_loader)
-        for epoch in tqdm(range(self.flags.num_epochs)): 
-            for i, (feats, labels) in enumerate(tqdm(train_loader)):
-                #print(labels)
-                feats = feats.cuda()
-                labels = labels.cuda()
-                loss = self.network(feats, labels=labels)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                if (i+1) % 100 == 0:
-                    print('{}: Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}' 
-                        .format(loss_type, epoch+1, args.num_epochs, i+1, total_step, loss.item()))
+    def train_am(self, flags):
 
-            if((epoch+1) % 8 == 0):
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = param_group['lr']/4
-            
-        return model.cpu()
+        loader = self.dataloaders['train']
 
-    def train_triplet(self, flags):
+        iters = 0
 
-        flag_training_triplets_path = False
+        start = time()
 
-        if flags.use_semihard_negatives:
-            print("Using Semi-Hard negative triplet selection!")
-        else:
-            print("Using Hard negative triplet selection!")
+        while self.cur_epoch < self.flags.num_epochs:
 
-        start_epoch = 0
-
-        print("Training using triplet loss starting for {} epochs:\n".format(flags.num_epochs - start_epoch))
-
-        for epoch in range(start_epoch, flags.num_epochs):
-            num_valid_training_triplets = 0
-            l2_distance = PairwiseDistance(p=2)
-            _training_triplets_path = None
-
-            if flag_training_triplets_path:
-                _training_triplets_path = flags.training_triplets_path
-                flag_training_triplets_path = False  # Only load triplets file for the first epoch
-
-            # Re-instantiate training dataloader to generate a triplet list for this training epoch
-            train_dataloader = torch.utils.data.DataLoader(
-                dataset=TripletFaceDataset(
-                    root_dir=flags.dataroot,
-                    training_dataset_csv_path=flags.training_dataset_csv_path,
-                    num_triplets=flags.iterations_per_epoch * flags.batch_size,
-                    num_human_identities_per_batch=flags.num_human_identities_per_batch,
-                    triplet_batch_size=flags.batch_size,
-                    epoch=epoch,
-                    training_triplets_path=_training_triplets_path,
-                    transform=self.data_transforms
-                ),
-                batch_size=flags.batch_size,
-                num_workers=flags.num_workers,
-                shuffle=False  # Shuffling for triplets with set amount of human identities per batch is not required
-            )
-
-            # Training pass
             self.network.train()
-            progress_bar = enumerate(tqdm(train_dataloader))
-
+            self.metric_fc.train()
+            data_iter = tqdm(enumerate(loader), disable=False)
             total_loss = 0.0
 
-            for batch_idx, (batch_sample) in progress_bar:
 
-                # Forward pass - compute embeddings
-                anc_imgs = batch_sample['anc_img']
-                pos_imgs = batch_sample['pos_img']
-                neg_imgs = batch_sample['neg_img']
+            for step, data in data_iter:
+                inputs, labels = data
 
-                # Concatenate the input images into one tensor because doing multiple forward passes would create
-                #  weird GPU memory allocation behaviours later on during training which would cause GPU Out of Memory
-                #  issues
-                all_imgs = torch.cat((anc_imgs, pos_imgs, neg_imgs))  # Must be a tuple of Torch Tensors
+                if (self.cur_epoch == 0) and (step == 0) and (self.writer is not None):
+                    grid = torchvision.utils.make_grid(inputs)
+                    self.writer.add_image("images", grid)
 
-                anc_embeddings, pos_embeddings, neg_embeddings, self.network = self.forward_pass(
-                    imgs=all_imgs,
-                    model=self.network,
-                    batch_size=flags.batch_size
-                )
+                inputs = Variable(inputs.cuda())
 
-                pos_dists = l2_distance.forward(anc_embeddings, pos_embeddings)
-                neg_dists = l2_distance.forward(anc_embeddings, neg_embeddings)
+                labels = Variable(labels.cuda())
 
-                if flags.use_semihard_negatives:
-                    # Semi-Hard Negative triplet selection
-                    #  (negative_distance - positive_distance < margin) AND (positive_distance < negative_distance)
-                    #   Based on: https://github.com/davidsandberg/facenet/blob/master/src/train_tripletloss.py#L295
-                    first_condition = (neg_dists - pos_dists < flags.margin).cpu().numpy().flatten()
-                    second_condition = (pos_dists < neg_dists).cpu().numpy().flatten()
-                    all = (np.logical_and(first_condition, second_condition))
-                    valid_triplets = np.where(all == 1)
-                else:
-                    # Hard Negative triplet selection
-                    #  (negative_distance - positive_distance < margin)
-                    #   Based on: https://github.com/davidsandberg/facenet/blob/master/src/train_tripletloss.py#L296
-                    all = (neg_dists - pos_dists < flags.margin).cpu().numpy().flatten()
-                    valid_triplets = np.where(all == 1)
-
-                anc_valid_embeddings = anc_embeddings[valid_triplets]
-                pos_valid_embeddings = pos_embeddings[valid_triplets]
-                neg_valid_embeddings = neg_embeddings[valid_triplets]
-
-                
-
-                # Calculate triplet loss
-                triplet_loss = TripletLoss(margin=flags.margin).forward(
-                    anchor=anc_valid_embeddings,
-                    positive=pos_valid_embeddings,
-                    negative=neg_valid_embeddings
-                )
-
-                total_loss = triplet_loss.cpu().item()
-
-                # Calculating number of triplets that met the triplet selection method during the epoch
-                num_valid_training_triplets += len(anc_valid_embeddings)
-
-                # Backward pass
                 self.network_optimizer.zero_grad()
-                triplet_loss.backward()
+
+                embeddings = self.network(inputs)
+                outputs = self.metric_fc(embeddings, labels)
+                loss = self.loss_fn(outputs, labels)
+
+                self.network_optimizer.zero_grad()
+                loss.backward()
                 self.network_optimizer.step()
 
-            # Print training statistics for epoch and add to log
-            print('Epoch {}:\t loss{} and Number of valid training triplets in epoch: {}'.format(
-                    epoch,
-                    total_loss,
-                    num_valid_training_triplets
-                )
-            )
+                iters += 1
 
-            with open('logs/{}_log_triplet.txt'.format(flags.backbone), 'a') as f:
-                val_list = [
-                    epoch,
-                    num_valid_training_triplets
-                ]
-                log = '\t'.join(str(value) for value in val_list)
-                f.writelines(log + '\n')
 
-            # Evaluation pass on LFW dataset
-            # best_distances = validate_lfw(
-            #     model=model,
-            #     lfw_dataloader=lfw_dataloader,
-            #     model_architecture=model_architecture,
-            #     epoch=epoch
-            # )
+                if iters % flags.print_freq == 0:
+
+                    outputs = outputs.data.cpu().numpy()
+                    outputs = np.argmax(outputs, axis=1)
+
+                    labels = labels.data.cpu().numpy()
+                    # print(output)
+                    # print(label)
+                    acc = np.mean((outputs == labels).astype(int))
+                    speed = flags.print_freq / (time.time() - start)
+                    time_str = time.asctime(time.localtime(time.time()))
+                    print('{} train epoch {} iter {} {} iters/s loss {} acc {}'.format(time_str, self.cur_epoch, iters, speed,
+                                                                                       loss.item(), acc))
+
+
+                    start = time.time()
+
+            self.cur_epoch += 1
+
 
 
 
