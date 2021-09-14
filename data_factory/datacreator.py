@@ -45,10 +45,7 @@ def get_data(flags):
 
     if not os.path.exists(json_filename):
 
-        # to find path of xml file containing haarCascade file
-        cfp = os.path.dirname(cv2.__file__) + "/data/haarcascade_frontalface_alt2.xml"
-        # load the harcaascade in the cascade classifier
-        face_cascade = cv2.CascadeClassifier(cfp)
+
 
         list_names_dir = sorted(glob(os.path.join(flags.dataroot, flags.dataset, flags.dataset, '*')))
         random.shuffle(list_names_dir)
@@ -87,7 +84,7 @@ def get_data(flags):
             taille += 1
         nb_classes_train += 1
 
-    test_data = []
+    test_data = {}
     nb_classes_test = 0
     #list names with more than 1 image
     list_more_1_image = []
@@ -98,9 +95,7 @@ def get_data(flags):
         if len(dict_data[name]) == 1:
             list_only_1_image.append(name)
         for filename, label in dict_data[name]:
-            test_data.append(
-                (filename, label)
-            )
+            test_data[filename] = label
             taille += 1
         nb_classes_test += 1
 
@@ -129,6 +124,7 @@ def get_data(flags):
 
     val_lists = copy.copy(matched_pairs[0:3000]) + copy.copy(mismached_pairs[0:3000])
 
-    data_files = {'train': train_data, 'val': val_lists, 'test': []}
+    #A dictionnary containing all dataset. For val data, the list of pairs and the label of each image
+    data_files = {'train': train_data, 'val': (val_lists, test_data), 'test': []}
 
     return data_files, taille, nb_classes_train, nb_classes_test

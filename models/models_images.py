@@ -10,8 +10,6 @@ import torch.utils.model_zoo as model_zoo
 from torch.autograd import Variable
 from torch.optim import lr_scheduler, optimizer
 
-from pytorch_balanced_sampler.sampler import SamplerFactory
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,12 +38,11 @@ import json
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 from models.plotting import plot
-from torch.nn.modules.distance import PairwiseDistance
-from models.plotting import plot_roc_lfw, plot_accuracy_lfw
 from backbones.margins import *
-from miscellaneous.utils import Visualizer
-import time
 from .test_utils import *
+from .tsne_utils import *
+import copy
+from itertools import combinations
 
 
 def worker_init_fn(worker_id):
@@ -94,17 +91,10 @@ class ImageModel(object):
         self.history = {'loss': [], 'accuracy': []}
         self.start_training = datetime.now()
         self.end_training = None
-        self.train_num_iter = 0
         self.embedding_dimension = flags.embedding_dimension
-        self.num_human_identities_per_batch = flags.num_human_identities_per_batch
         self.batch_size = flags.batch_size
-        self.lfw_batch_size = flags.lfw_batch_size
-        self.resume_path = flags.resume_path
         self.num_workers = flags.num_workers
-        self.optimizer = flags.optimizer
-        self.margin = flags.margin
-        self.use_semihard_negatives = flags.use_semihard_negatives
-        self.training_triplets_path = flags.training_triplets_path
+        self.opencv_net = None
         if flags.phase == 'train':
             self.writer = SummaryWriter(
                 log_dir=os.path.join('runs', self.flags.all_parameters + '_' + str(datetime.now())))
@@ -140,51 +130,22 @@ class ImageModel(object):
 
         image_size = flags.image_size
         self.train_data = self.datafiles['train']
-        if self.flags.validate:
-            self.val_data = self.datafiles['val']
-        else:
-            self.val_data = []
-
-        self.test_data = self.datafiles['test']
 
         train_dataset = Image_Reader(
             args=self.flags, filelist=self.train_data)
-        val_dataset = Image_Reader(args=self.flags,
-                                   filelist=self.val_data,
-                                   is_train=False)
-        test_dataset = Image_Reader(args=self.flags,
-                                    filelist=self.test_data,
-                                    is_train=False)
 
         self.datasets = {
-            'train': train_dataset,
-            'val': val_dataset,
-            'test': test_dataset
+            'train': train_dataset
         }
 
         if flags.phase == 'vizualize':
             flags.batch_size = 1
 
         self.train_len = train_dataset.__len__()
-        self.test_len = test_dataset.__len__()
-        self.val_len = val_dataset.__len__()
 
         print('longeur train {}'.format(train_dataset.__len__()))
-        print('longeur val {}'.format(val_dataset.__len__()))
-        print('longeur test {}'.format(test_dataset.__len__()))
 
         print('number of workers = {}'.format(mp.cpu_count()))
-
-        image_datasets = {'train': train_dataset,
-                          'val': val_dataset, 'test': test_dataset}
-
-        self.dataset_sizes = {
-            x: len(image_datasets[x])
-            for x in ['train', 'val', 'test']
-        }
-
-        val_dataloader = None
-        test_dataloader = None
 
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
@@ -194,25 +155,7 @@ class ImageModel(object):
             pin_memory=True,
             worker_init_fn=worker_init_fn)
 
-        if self.dataset_sizes['val'] > 0:
-            val_dataloader = torch.utils.data.DataLoader(
-                val_dataset,
-                batch_size=flags.batch_size * self.num_devices,
-                shuffle=True,
-                num_workers=0,
-                pin_memory=True,
-                worker_init_fn=worker_init_fn)
-
-        if self.dataset_sizes['test'] > 0:
-            test_dataloader = torch.utils.data.DataLoader(
-                test_dataset,
-                batch_size=flags.batch_size * self.num_devices,
-                shuffle=(flags.phase != 'timeline_prediction'),
-                num_workers=0,
-                pin_memory=True,
-                worker_init_fn=worker_init_fn)
-
-        self.dataloaders = {'train': train_dataloader, 'val': val_dataloader, 'test': test_dataloader}
+        self.dataloaders = {'train': train_dataloader}
 
         if not os.path.exists(flags.logs):
             os.makedirs(flags.logs)
@@ -220,7 +163,6 @@ class ImageModel(object):
     def freeze(self):
         """Freeze model except the last layer"""
         for name, param in self.network.named_parameters():
-            # or 'layer3' in name
             if 'fc' in name or 'classifier' in name:
                 param.requires_grad = True
             else:
@@ -231,16 +173,15 @@ class ImageModel(object):
         if flags.load_checkpoint != -7:
             self.load_checkpoint(flags.load_checkpoint)
 
-        for name, para in self.network.named_parameters():
-            print(name, para.size())
+        # for name, para in self.network.named_parameters():
+        #     print(name, para.size())
 
         total_params = 0
-
-        named_params_to_update = {}
 
         if self.current_lr is None:
             self.current_lr = flags.init_lr
 
+        named_params_to_update = {}
         for name, param in self.network.named_parameters():
             total_params += 1
             if param.requires_grad:
@@ -253,18 +194,18 @@ class ImageModel(object):
             if param.requires_grad:
                 metrics_parameters_to_update[name] = param
 
-        print("Params to learn:")
-        if len(named_params_to_update) + len(metrics_parameters_to_update) == total_params:
-            print("\tfull network")
-        else:
-            for name in named_params_to_update:
-                print("\t{}".format(name))
+        if flags.phase == 'train':
+            print("Params to learn:")
+            if len(named_params_to_update) + len(metrics_parameters_to_update) == total_params:
+                print("\tfull network")
+            else:
+                for name in named_params_to_update:
+                    print("\t{}".format(name))
 
         parameters = [{'params': list(named_params_to_update.values())},
                       {'params': list(metrics_parameters_to_update.values())}]
 
         if flags.optimizer == "sgd":
-            print(colored(flags.optimizer, 'red'))
             self.network_optimizer = optim.SGD(
                 params=parameters,
                 lr=self.init_lr,
@@ -275,7 +216,6 @@ class ImageModel(object):
             )
 
         elif flags.optimizer == "adagrad":
-            print(colored(flags.optimizer, 'red'))
             self.network_optimizer = optim.Adagrad(
                 params=parameters,
                 lr=self.init_lr,
@@ -286,7 +226,6 @@ class ImageModel(object):
             )
 
         elif flags.optimizer == "rmsprop":
-            print(colored(flags.optimizer, 'red'))
             self.network_optimizer = optim.RMSprop(
                 params=parameters,
                 lr=self.init_lr,
@@ -298,7 +237,6 @@ class ImageModel(object):
             )
 
         elif flags.optimizer == "adam":
-            print(colored(flags.optimizer, 'red'))
             self.network_optimizer = optim.Adam(
                 params=parameters,
                 lr=self.init_lr,
@@ -313,9 +251,8 @@ class ImageModel(object):
         self.loss_fn = torch.nn.CrossEntropyLoss()
 
         self.scheduler = optim.lr_scheduler.CyclicLR(
-                self.network_optimizer, base_lr=self.init_lr, max_lr=1e-2, step_size_up=self.flags.step_size,
-                cycle_momentum=(flags.optimizer != 'adam' and flags.optimizer != 'adagrad'))
-
+            self.network_optimizer, base_lr=self.init_lr, max_lr=1e-2, step_size_up=self.flags.step_size,
+            cycle_momentum=(flags.optimizer != 'adam' and flags.optimizer != 'adagrad'))
 
         self.loss_function = torch.nn.CrossEntropyLoss()
 
@@ -344,10 +281,6 @@ class ImageModel(object):
 
         torch.save(ckpt, self.save_epoch_fmt_task.format(self.cur_epoch))
 
-        # if self.cur_epoch == self.best_epoch:
-        #     torch.save(ckpt, os.path.join(self.checkpoint_path,
-        #                                   'best_model.pt'))
-
     def load_checkpoint(self, epoch):
 
         def load_keys(ckpt):
@@ -371,18 +304,12 @@ class ImageModel(object):
         if load_keys(ckpt):
             print('Checkpoint number {} loaded  ---> {}'.format(epoch, ckpt))
         else:
+            print(colored('No checkpoint found at: {}'.format(ckpt), 'red'))
+            if self.flags.phase != 'train':
+                raise ValueError(
+                    '----------Unable to load checkpoint  {}. The program will exit now----------\n\n'.format(ckpt))
 
-            ckpt_best = os.path.join(self.checkpoint_path, 'best_model.pt')
-
-            if load_keys(ckpt_best):
-                print('Checkpoint number {} loaded  ---> {}'.format(self.cur_epoch, ckpt_best))
-            else:
-                print(colored('No checkpoint found at: {}'.format(ckpt), 'red'))
-                if self.flags.phase != 'train':
-                    raise ValueError(
-                        '----------Unable to load checkpoint  {}. The program will exit now----------\n\n'.format(ckpt))
-
-            return False
+        return False
 
     def printing_train(self, tot_loss, current_lr):
         aff = 'Train results : ite:{}, Loss:{:.4f}, current_lr: {}'.format(self.cur_epoch, tot_loss, current_lr)
@@ -391,9 +318,7 @@ class ImageModel(object):
     def train_am(self, flags):
 
         loader = self.dataloaders['train']
-
         iters = 0
-
         start = time.time()
 
         while self.cur_epoch < self.flags.num_epochs:
@@ -438,15 +363,15 @@ class ImageModel(object):
                     acc = np.mean((outputs == labels).astype(int))
                     speed = flags.print_freq / (time.time() - start)
                     time_str = time.asctime(time.localtime(time.time()))
-                    print('Train epoch {} iter {} {} iters/s loss {:.4f} acc {}'.format(self.cur_epoch, iters, speed, loss.item(), acc))
+                    print('Train epoch {} iter {} {} iters/s loss {:.4f} acc {}'.format(self.cur_epoch, iters, speed,
+                                                                                        loss.item(), acc))
 
-                    acc =  self.validation()
-                    print(colored('Testing accuracy {}'.format(acc), 'blue'))
-                    start = time.time()
+            acc = self.validation()
+            # print(colored('Testing accuracy {}'.format(acc), 'blue'))
+            start = time.time()
 
             self.scheduler.step()
             self.current_lr = self.scheduler.get_last_lr()
-
 
             self.cur_epoch += 1
 
@@ -454,26 +379,185 @@ class ImageModel(object):
                 1) % self.save_every == 0 and self.cur_epoch != 0:
                 self.checkpointing()
 
-    def validation(self):
+    def test(self, flags):
+        self.load_checkpoint(self.flags.load_checkpoint)
+        self.cur_epoch = self.flags.load_checkpoint
+        self.network.eval()
+        self.validation()
+
+    def convert_to_onnx(self, flags):
+        self.load_checkpoint(self.flags.load_checkpoint)
+        onnx_model_name = flags.backbone + ".onnx"
+        # create directory for further converted model
+        # get full path to the converted model
+        generated_input = Variable(
+            torch.randn(1, 1, 128, 128)
+        )
+        full_model_path = os.path.join(self.checkpoint_path, onnx_model_name)
+        torch.onnx.export(
+            self.network,
+            generated_input,
+            full_model_path,
+            verbose=False,
+            input_names=["input"],
+            output_names=["output"],
+            opset_version=11
+        )
+        print('Model coonvert to onnx')
+        self.opencv_net = cv2.dnn.readNetFromONNX(full_model_path)
+
+    def evaluate_pt_vs_cv(self, flags):
+        if self.opencv_net is None:
+            self.convert_to_onnx(flags)
+
+        print(colored('With pytorch', 'red'))
+        self.validation(onnx=False)
+        print(colored('With opencv', 'red'))
+        self.validation(onnx=False)
+
+        return
+
+    def demo(self, flags):
+
+        link_video = flags.video
+        list_imgs = flags.list_imgs
+        img_paths = [os.path.join('demo_faces', each) for each in list_imgs]
+
+
+        searches_faces = []
+        for img_path in img_paths:
+            img = cv2.imread(img_path, 0)
+            if img:
+                img = cv2.resize(img, dsize=(128,128))
+                img = np.expand_dims(img, axis=2)
+                searches_faces.append(img)
+
+        # to find path of xml file containing haarCascade file
+        cfp = os.path.dirname(cv2.__file__) + "/data/haarcascade_frontalface_alt2.xml"
+        # load the harcaascade in the cascade classifier
+        face_cascade = cv2.CascadeClassifier(cfp)
+
+        cap = cv2.VideoCapture(os.path.join('demo_videos', link_video))
+
+        # Read until video is completed
+        while (cap.isOpened()):
+            # Capture frame-by-frame
+            ret, frame = cap.read()
+
+            faces = face_cascade.detectMultiScale(frame)
+
+            list_faces_images = []
+            ref_values = []
+
+            for i, (x, y, w, h) in enumerate(faces):
+                img = copy.copy(frame[y:y + h, x:x + w])
+                img = cv2.resize(img, dsize=(128, 128))
+                img = rgb2gray(img)
+                img = np.expand_dims(img, axis=2)
+                list_faces_images.append(img)
+                ref_values.append(
+                    (i, (x, y, w, h))
+                )
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+
+            #video_features = self.get_features_imgs(list_faces_images, onnx=True)
+            #searches_features = self.get_features_imgs()
+
+
+            if ret == True:
+
+                # Display the resulting frame
+                cv2.imshow('Demo', frame)
+
+                # Press Q on keyboard to  exit
+                if cv2.waitKey(25) & 0xFF == ord('q'):
+                    break
+
+            # Break the loop
+            else:
+                break
+
+        # When everything done, release the video capture object
+        cap.release()
+
+        # Closes all the frames
+        cv2.destroyAllWindows()
+
+        return
+
+    def validation(self, onnx=False):
         flags = self.flags
         s = time.time()
-        identity_list = get_lfw_list(self.datafiles['val'])
+        list_labels = []
+        identity_list = get_lfw_list(self.datafiles['val'][0])
         img_paths = [os.path.join(each) for each in identity_list]
+        for each in identity_list:
+            list_labels.append(
+                self.datafiles['val'][1][each]
+            )
 
-        features, cnt = self.get_features(img_paths, batch_size=flags.batch_size)
+        features, cnt = self.get_features(img_paths, onnx)
 
         t = time.time() - s
 
         print('total time is {}, average time is {}'.format(t, t / cnt))
-        fe_dict = get_feature_dict(identity_list, features)
-        acc, th = test_performance(fe_dict, self.datafiles['val'])
+        fe_dict = get_feature_dict(identity_list, features, )
+        acc, th = test_performance(fe_dict, self.datafiles['val'][0])
+        plot(features, np.asarray(list_labels),
+             fig_path='./figs/{}_{}_{}.png'.format(flags.loss_type, self.cur_epoch, onnx))
         print('lfw face verification accuracy: ', acc, 'threshold: ', th)
+
+        # plot_with_pca(self.checkpoint_path, features, img_paths, list_labels)
 
         return acc
 
-    def get_features(self, test_list, batch_size=10):
+    def get_features_imgs(self, list_imgs, onnx=False):
 
         self.network.eval()
+
+        batch_size = 1
+
+        images = None
+        features = []
+        cnt = 0
+        for i, image in enumerate(list_imgs):
+
+            if images is None:
+                images = image
+            else:
+                images = np.concatenate((images, image), axis=0)
+
+            if images.shape[0] % batch_size == 0 or i == len(list_imgs) - 1:
+                cnt += 1
+                if not onnx:
+                    data = torch.from_numpy(images)
+                    data = data.cuda()
+                    # print(data.shape)
+                    output = self.network(data)
+                    output = output.data.cpu().numpy()
+                else:
+                    input_blob = cv2.dnn.blobFromImage(
+                        image=images,
+                        scalefactor=1
+                    )
+                    output = self.opencv_net(input_blob)
+
+                fe_1 = output[::2]
+                fe_2 = output[1::2]
+                feature = np.hstack((fe_1, fe_2))
+                # print(feature.shape)
+
+                features.append(feature)
+
+                images = None
+
+        return features, cnt
+
+    def get_features(self, test_list, onnx=False):
+
+        self.network.eval()
+
+        batch_size = 1
 
         images = None
         features = None
@@ -490,12 +574,18 @@ class ImageModel(object):
 
             if images.shape[0] % batch_size == 0 or i == len(test_list) - 1:
                 cnt += 1
-
-                data = torch.from_numpy(images)
-                data = data.cuda()
-                # print(data.shape)
-                output = self.network(data)
-                output = output.data.cpu().numpy()
+                if not onnx:
+                    data = torch.from_numpy(images)
+                    data = data.cuda()
+                    # print(data.shape)
+                    output = self.network(data)
+                    output = output.data.cpu().numpy()
+                else:
+                    input_blob = cv2.dnn.blobFromImage(
+                        image=images,
+                        scalefactor=1
+                    )
+                    output = self.opencv_net(input_blob)
 
                 fe_1 = output[::2]
                 fe_2 = output[1::2]

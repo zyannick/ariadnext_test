@@ -58,11 +58,11 @@
     "image_size": 140,
     "use_semihard_negatives": false,
     "training_triplets_path": null,
-    "loss_type": "cosface",
+    "loss_type": "arcface",
     "writer_dir": "runs",
     "gpus": "0",
     "launch_seed": 0,
-    "launch_mode": "resnet18_lfw_croppedcosface",
-    "all_parameters": "resnet18_lfw_cropped_seed0",
-    "model_path": "checkpoint/resnet18_lfw_cropped/_seed0"
+    "launch_mode": "resnet18_lfw_cropped_arcface",
+    "all_parameters": "resnet18_lfw_cropped_arcface_seed0",
+    "model_path": "checkpoint/resnet18_lfw_cropped_arcface/_seed0"
 }

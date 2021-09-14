@@ -13,6 +13,9 @@ def get_lfw_list(pairs):
             data_list.append(pair[1])
     return data_list
 
+def rgb2gray(rgb):
+    return np.dot(rgb[..., :3], [0.2989, 0.5870, 0.1140])
+
 def get_feature_dict(test_list, features):
     fe_dict = {}
     for i, each in enumerate(test_list):
